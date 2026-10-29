@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>记忆星图</title>
+<script src="./vis-network.min.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b1020; color: #e6e6e6;
+    font-family: system-ui, "Microsoft YaHei", sans-serif; overflow: hidden; }
+  #graph { width: 100%; height: 100vh; }
+  #panel { position: fixed; top: 12px; left: 12px; width: 260px;
+    background: rgba(16,22,40,.92); border: 1px solid #2a3556; border-radius: 10px;
+    padding: 12px; font-size: 13px; z-index: 10; }
+  #panel h3 { margin: 0 0 8px; font-size: 14px; color: #8fb4ff; }
+  #panel label { display: block; margin-top: 8px; color: #9aa7c7; }
+  #panel input, #panel select { width: 100%; box-sizing: border-box; margin-top: 4px;
+    padding: 6px; background: #0f1730; color: #e6e6e6;
+    border: 1px solid #2a3556; border-radius: 6px; }
+  #legend { margin-top: 12px; }
+  #legend div { margin: 4px 0; }
+  #legend span { display: inline-block; width: 10px; height: 10px;
+    border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  #detail { position: fixed; bottom: 12px; right: 12px; width: 300px;
+    background: rgba(16,22,40,.95); border: 1px solid #2a3556; border-radius: 10px;
+    padding: 12px; font-size: 13px; display: none; z-index: 10; }
+  #detail h4 { margin: 0 0 8px; color: #8fb4ff; }
+  #detail div { margin: 4px 0; line-height: 1.5; }
+  #detail .close { float: right; cursor: pointer; color: #9aa7c7; }
+  #tip { position: fixed; bottom: 12px; left: 12px; font-size: 12px;
+    color: #6c7a99; z-index: 10; }
+</style>
+</head>
+<body>
+
+<div id="panel">
+  <h3>记忆星图</h3>
+  <label>搜索节点</label>
+  <input id="search" placeholder="输入名字..." />
+  <label>按类型筛选</label>
+  <select id="filter"><option value="">全部</option></select>
+  <label>时间轴回溯</label>
+  <input type="range" id="time-slider" min="0" max="100" value="100" style="width: 100%; margin-top: 8px;">
+  <div id="time-display" style="font-size: 12px; color: #8fb4ff; margin-top: 4px;">显示全部记忆</div>
+  <div id="legend"></div>
+</div>
+
+<div id="detail">
+  <span class="close" id="detail-close">×</span>
+  <h4 id="d-name"></h4>
+  <div id="d-type"></div>
+  <div id="d-summary"></div>
+  <div id="d-source"></div>
+  <div id="d-conf"></div>
+</div>
+
+<div id="tip">拖拽画布 · 滚轮缩放 · 点击节点看详情</div>
+<div id="graph"></div>
+
+<script>
+// ================= 数据占位符（由 build_graph.py 替换） =================
+const GRAPH_DATA = __GRAPH_DATA__;
+// ======================================================================
+
+const COLORS = {
+  "人物": "#ff6b6b",
+  "项目": "#4dabf7",
+  "概念": "#69db7c",
+  "事件": "#ffd43b",
+  "实体": "#adb5bd"
+};
+
+// 防御：如果占位符没被替换，给个空图，避免整页白屏
+const DATA = (typeof GRAPH_DATA === "object" && GRAPH_DATA)
+  ? GRAPH_DATA
+  : { nodes: [], edges: [] };
+
+const nodes = new vis.DataSet(DATA.nodes);
+const edges = new vis.DataSet(DATA.edges);
+
+const container = document.getElementById("graph");
+const network = new vis.Network(container, { nodes, edges }, {
+  
+  nodes: {
+    shape: "dot",
+    borderWidth: 0,          // 去掉边框，看起来更纯粹
+    font: { 
+      color: "#e6e6e6", 
+      size: 13, 
+      face: "Microsoft YaHei",
+      vadjust: 14            // 让文字往下沉一点，不遮挡中心点
+    },
+    shadow: {                // 给节点加一点点光晕，像星星发光
+      enabled: true,
+      color: 'rgba(143, 180, 255, 0.5)', 
+      size: 12,
+      x: 0,
+      y: 0
+    }
+  },
+  edges: {
+    arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+    color: { color: "rgba(143, 180, 255, 0.4)", highlight: "#8fb4ff" }, // 平时线条变暗，悬停高亮
+    width: 1,
+    font: { 
+      color: "#9aa7c7", 
+      size: 10, 
+      strokeWidth: 3,         // 给关系文字加描边
+      strokeColor: "#0b1020", // 描边颜色和背景一样，防止线条穿过文字
+      face: "Microsoft YaHei",
+      align: "middle"
+    },
+    smooth: false
+  },
+  physics: {
+    solver: "forceAtlas2Based",
+    forceAtlas2Based: { 
+      gravitationalConstant: -80, // 加大排斥力，让节点像星系一样散开一点
+      springLength: 150,           // 连线变长
+      springConstant: 0.05         // 弹簧变软
+    },
+    stabilization: { enabled: true, iterations: 300 } // 稍微加一点迭代次数让它更稳
+  },
+  interaction: { hover: true, tooltipDelay: 150, multiselect: true }
+});
+
+// ★ 关键：排好版后彻底关闭物理引擎，防止节点一直微微抖动
+network.on("stabilizationIterationsDone", function () {
+    network.setOptions({ physics: false });
+});
+
+// ================= 图例 + 类型下拉 =================
+const types = [...new Set(DATA.nodes.map(n => n.group))];
+const filterEl = document.getElementById("filter");
+const legendEl = document.getElementById("legend");
+types.forEach(t => {
+  filterEl.insertAdjacentHTML("beforeend",
+    `<option value="${t}">${t}</option>`);
+  legendEl.insertAdjacentHTML("beforeend",
+    `<div><span style="background:${COLORS[t] || "#adb5bd"}"></span>${t}</div>`);
+});
+
+// ================= 时间轴回溯 =================
+const timeSlider = document.getElementById("time-slider");
+const timeDisplay = document.getElementById("time-display");
+let maxTime = Date.now(); // 默认最大值
+
+// 1. 找到所有节点里最新的时间，作为滑块的终点
+if (DATA.nodes.length > 0) {
+    const times = DATA.nodes.map(n => new Date(n.created_at || Date.now()).getTime());
+    maxTime = Math.max(...times);
+    const minTime = Math.min(...times);
+    timeSlider.min = minTime;
+    timeSlider.max = maxTime;
+    timeSlider.value = maxTime;
+}
+
+// 2. 监听滑块拖动
+timeSlider.addEventListener("input", (e) => {
+    const selectedTime = parseInt(e.target.value);
+    const dateStr = new Date(selectedTime).toLocaleString();
+    
+    if (selectedTime === maxTime) {
+        timeDisplay.textContent = "显示全部记忆";
+    } else {
+        timeDisplay.textContent = "早于: " + dateStr;
+    }
+
+    // 3. 过滤节点：晚于选定时间的节点隐藏
+    nodes.update(DATA.nodes.map(n => {
+        const nodeTime = new Date(n.created_at || Date.now()).getTime();
+        return {
+            id: n.id,
+            hidden: nodeTime > selectedTime
+        };
+    }));
+});
+
+// ================= 点击节点看详情 =================
+const detail = document.getElementById("detail");
+network.on("click", params => {
+  if (!params.nodes.length) {
+    detail.style.display = "none";
+    return;
+  }
+  const n = nodes.get(params.nodes[0]);
+  document.getElementById("d-name").textContent = n.label || "";
+  document.getElementById("d-type").textContent = "类型：" + (n.group || "—");
+  document.getElementById("d-summary").textContent = "摘要：" + (n.summary || "—");
+  document.getElementById("d-source").textContent = "来源：" + (n.source || "—");
+  document.getElementById("d-conf").textContent =
+    "置信度：" + (n.confidence != null ? n.confidence : "—");
+  detail.style.display = "block";
+});
+document.getElementById("detail-close").onclick = () => {
+  detail.style.display = "none";
+};
+
+// ================= 搜索：高亮 + 聚焦 =================
+const searchEl = document.getElementById("search");
+searchEl.addEventListener("input", e => {
+  const kw = e.target.value.trim();
+  if (!kw) {
+    // 还原全部
+    nodes.update(DATA.nodes.map(n => ({
+      id: n.id,
+      color: n.color || { background: COLORS[n.group] || "#adb5bd", border: "#fff" },
+      opacity: 1,
+      hidden: false
+    })));
+    return;
+  }
+  const hit = DATA.nodes.filter(n =>
+    (n.label || "").includes(kw) || (n.summary || "").includes(kw)
+  ).map(n => n.id);
+
+  nodes.update(DATA.nodes.map(n => ({
+    id: n.id,
+    color: hit.includes(n.id)
+      ? { background: "#ffd43b", border: "#ffffff" }
+      : { background: "#1a2340", border: "#2a3556" },
+    opacity: hit.includes(n.id) ? 1 : 0.2
+  })));
+
+  if (hit.length) {
+    network.focus(hit[0], { scale: 1.4, animation: { duration: 400 } });
+    network.selectNodes(hit);
+  }
+});
+
+// ================= 类型筛选 =================
+filterEl.addEventListener("change", e => {
+  const t = e.target.value;
+  nodes.update(DATA.nodes.map(n => ({
+    id: n.id,
+    hidden: !!t && n.group !== t
+  })));
+});
+
+// ================= 空数据提示 =================
+if (!DATA.nodes.length) {
+  document.getElementById("tip").textContent =
+    "当前没有记忆数据。先运行 python app.py node / edge，再执行 python build_graph.py";
+}
+</script>
+</body>
+</html>
